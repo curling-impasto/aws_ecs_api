@@ -1,0 +1,110 @@
+name: CI
+
+# PR to main: test and prove the image builds
+# Push to main: test, build, push to ECR, deploy to ECS, smoke test
+# Infrastructure is handled by terraform.yml
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "application/**"
+      - "docker/**"
+      - ".github/workflows/ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "application/**"
+      - "docker/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+# Never cancel a running deploy, it can leave a half finished rollout
+concurrency:
+  group: sample-api-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# AWS access comes from the CodeBuild runner role, no keys or OIDC needed
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: sample-ecr-repo
+  ECS_CLUSTER: sample-cluster
+  ECS_SERVICE: sample-api
+  CONTAINER_NAME: sample-api
+  IMAGE_TAG: sample-api-${{ github.sha }}
+
+jobs:
+  # One job means one runner. The docker runner is privileged, the default runner has no Docker
+  ci:
+    name: Test, build and deploy
+    runs-on: codebuild-docker-github-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: application/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r application/requirements-dev.txt
+
+      - name: Run tests
+        working-directory: application
+        run: pytest
+
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t sample-api:build .
+
+      - name: Login to ECR
+        if: github.event_name != 'pull_request'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
+          docker tag sample-api:build "$IMAGE"
+          docker push "$IMAGE"
+
+      # Terraform owns the task definition shape, this only swaps the image
+      - name: Get current task definition
+        if: github.event_name != 'pull_request'
+        run: |
+          aws ecs describe-task-definition \
+            --region "${{ env.AWS_REGION }}" \
+            --task-definition "${{ env.ECS_SERVICE }}" \
+            --query taskDefinition > task-definition.json
+
+      - name: Render task definition
+        if: github.event_name != 'pull_request'
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      - name: Deploy to ECS
+        if: github.event_name != 'pull_request'
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      # The ALB is internal, only the VPC based runner can reach it
+      - name: Smoke test
+        if: github.event_name != 'pull_request'
+        run: |
+          BASE="${{ vars.SMOKE_TEST_BASE_URL }}/sample-api"
+          curl -fsS --retry 5 --retry-delay 10 --retry-all-errors "$BASE/health"
+          curl -fsS "$BASE/version"

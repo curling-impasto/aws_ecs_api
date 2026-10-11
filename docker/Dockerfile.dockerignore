@@ -1,0 +1,5 @@
+# Allowlist, so nothing else in the repo can reach the image
+*
+!application/requirements.txt
+!application/src/**
+**/__pycache__

@@ -1,0 +1,69 @@
+name: Terraform
+
+# PR to main: fmt, init, validate and plan only
+# Push to main: same plan, then apply exactly that plan
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+
+# There is no state lock table, so applies must never run in parallel
+concurrency:
+  group: sample-api-terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# AWS access comes from the CodeBuild runner role, no keys or OIDC needed
+env:
+  AWS_REGION: us-east-1
+  TF_DIR: terraform/environments/dev
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "0"
+  # Existing platform values, set as repository variables
+  TF_VAR_vpc_id: ${{ vars.VPC_ID }}
+  TF_VAR_subnet_ids: ${{ vars.SUBNET_IDS }}
+  TF_VAR_ecs_cluster_arn: ${{ vars.ECS_CLUSTER_ARN }}
+  TF_VAR_alb_security_group_id: ${{ vars.ALB_SECURITY_GROUP_ID }}
+  TF_VAR_alb_listener_arn: ${{ vars.ALB_LISTENER_ARN }}
+
+jobs:
+  # One job means one runner. Splitting plan and apply would allow an approval gate between them
+  terraform:
+    name: Plan and apply
+    runs-on: codebuild-${{ vars.GIT_RUNNER }}-github-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.5.7
+          terraform_wrapper: false
+
+      - name: Format check
+        run: terraform -chdir=terraform fmt -check -recursive
+
+      - name: Init
+        run: terraform -chdir="$TF_DIR" init
+
+      - name: Validate
+        run: terraform -chdir="$TF_DIR" validate
+
+      - name: Plan
+        run: terraform -chdir="$TF_DIR" plan -out=tfplan
+
+      # Applies the plan above, a changed state makes the apply fail
+      - name: Apply
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: terraform -chdir="$TF_DIR" apply tfplan
