@@ -1,0 +1,46 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: GitHub Actions OIDC role that can list S3 buckets
+
+Parameters:
+  GitHubSubjectPrefix:
+    Type: String
+    Default: repo:sample-org/aws_ecs_api
+    Description: OIDC subject prefix, add owner and repo IDs if the repo uses immutable subjects
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: Only this branch can assume the role
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: sample-api-github-oidc
+      Description: GitHub Actions OIDC role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "token.actions.githubusercontent.com:aud": sts.amazonaws.com
+                "token.actions.githubusercontent.com:sub": !Sub "${GitHubSubjectPrefix}:ref:refs/heads/${GitHubBranch}"
+      Policies:
+        - PolicyName: list-buckets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # ListAllMyBuckets does not support resource scoping
+              - Effect: Allow
+                Action: s3:ListAllMyBuckets
+                Resource: "*"
+
+Outputs:
+  RoleArn:
+    Description: Value for the AWS_OIDC_ROLE_ARN repository variable
+    Value: !GetAtt Role.Arn
+    Export:
+      Name: sample-api-github-oidc-role-arn

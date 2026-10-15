@@ -1,0 +1,33 @@
+name: OIDC test
+
+# Proves GitHub can assume an AWS role without stored keys
+on:
+  workflow_dispatch:
+
+# id-token lets the job request the OIDC token
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  #AWS_OIDC_ROLE_ARN: arn:aws:iam::<AccountID>:role/demo-api-github-oidc
+
+jobs:
+  s3-ls:
+    name: Assume role and list buckets
+    # GitHub hosted, so only the OIDC role can give AWS access
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assume role with OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Shows the role from OIDC, not a stored key
+      - name: Who am I
+        run: aws sts get-caller-identity
+
+      - name: List buckets
+        run: aws s3 ls
